@@ -1,5 +1,6 @@
 <#
-This script assigns GoTo phone numbers in bulk by importing the info from a CSV.
+This script routes GoTo phone numbers and grants SMS permissions in bulk by importing the info from a CSV.
+Please note that it does not change the user's external caller ID to their newly assigned phone number.
 #>
 
 # functions
@@ -13,7 +14,8 @@ function Initialize-ColorScheme
 
 function Show-Introduction
 {
-    Write-Host "This script assigns GoTo phone numbers in bulk by importing the info from a CSV." -ForegroundColor $infoColor
+    Write-Host "This script routes GoTo phone numbers and grants SMS permissions in bulk by importing the info from a CSV." -ForegroundColor $infoColor
+    Write-Host "Please note that it does not change the user's external caller ID to their newly assigned phone number." -ForegroundColor $infoColor
     Read-Host "Press Enter to continue"
 }
 
@@ -120,7 +122,7 @@ function Validate-AuthToken($authToken)
     return $valid
 }
 
-function Get-AccountKey($authToken)
+function Get-AccountKey($authToken, [switch]$exitOnFailure)
 {
     $url = "https://api.getgo.com/admin/rest/v1/me"
 
@@ -135,9 +137,18 @@ function Get-AccountKey($authToken)
     }
     catch
     {
-        Write-Host "There was an error getting your account info." $failColor
+        Write-Host "There was an error getting your account info." -ForegroundColor $failColor
         Write-Host "    $($responseError[0].Message)" -ForegroundColor $failColor
-        exit
+
+        if ($exitOnFailure)
+        {
+            Write-Host "Exiting script." -ForegroundColor $failColor
+            exit
+        }
+        else
+        {
+            return $null
+        }
     }
 
     return $response.accountKey
@@ -244,15 +255,14 @@ function Add-UserInfo($authToken, $accountKey, $importedCsv)
 
     for ($i = 0; $i -lt $importedCsv.Count; $i++)
     {
-        $userInfo = Get-GoToUser -AuthToken $authToken -AccountKey $accountKey -Email $importedCsv[$i].Email
+        $email = $importedCsv[$i].Email.Trim().Trim('"')
+        $userInfo = TryGet-GoToUser -AuthToken $authToken -AccountKey $accountKey -Email $email
         if ($userInfo)
         {
             Add-Member -InputObject $importedCsv[$i] -NotePropertyName "UserInfo" -NotePropertyValue $userInfo
         }
         else
         {
-            $importedCsv[$i] = $null
-
             if (-not($noToAll))
             {
                 $shouldExit = Prompt-YesOrNo -Question "Would you like to exit the script and make corrections?" -IncludeNoToAll
@@ -263,9 +273,8 @@ function Add-UserInfo($authToken, $accountKey, $importedCsv)
     }
 }
 
-function Get-GoToUser($authtToken, $accountKey, $email)
+function TryGet-GoToUser($authToken, $accountKey, $email)
 {
-    # In URL encoding, %20 = space and %22 = quotation mark.
     $url = "https://api.getgo.com/admin/rest/v1/accounts/$accountKey/users?filter=email eq `"$email`""
     $url = [System.Uri]::EscapeUriString($url) # url encodes the string
 
@@ -273,7 +282,7 @@ function Get-GoToUser($authtToken, $accountKey, $email)
         Authorization = "Bearer $authToken"
         Accept        = "application/json"
     }
-
+    
     try
     {
         $response = Invoke-RestMethod -Method "Get" -Uri $url -Headers $headers -ErrorVariable "responseError"
@@ -318,7 +327,10 @@ function Format-PhoneNumbers($importedCsv)
         $record."Phone Number" = $record."Phone Number".Replace("-", "").Replace("(", "").Replace(")", "").Replace(".", "").Replace("+", "").Replace(" ", "")
         $record."Phone Number" = "+$($record."Phone Number")"
     }
-    Write-Warning "There are $amountBlankNumbers empty phone numbers in the CSV."
+    if ($amountBlankNumber -gt 0)
+    {
+        Write-Warning "There are $amountBlankNumbers empty phone numbers in the CSV."
+    }    
 }
 
 function Get-AllPhoneNumbers($authToken, $accountKey)
@@ -441,19 +453,19 @@ function Assign-PhoneNumbers($authToken, $accountKey, $importedCsv, $phoneNumber
         if ($null -eq $record) { continue }
         if ($null -eq $record."Phone Number") { continue }
 
-        if ($record.Email)
+        if ($record.Email -and $record.UserInfo)
         {
             $phoneNumberId = $phoneNumberLookupTable[$record."Phone Number"]
             $extId = $extensionLookupTable[$record.UserInfo.results[0].settings.JIVE.primaryExtensionNumber]
 
-            $successful = Route-PhoneNumber $authToken $record."Phone Number" $phoneNumberId $extId $record.Email
+            $successful = TryRoute-PhoneNumber $authToken $record."Phone Number" $phoneNumberId $extId $record.Email
             if ($successful) { $amountRouted++ }
         }
 
-        if ($record."SMS Users")
+        if ($record."SMS Users")  
         {
             $smsUsers = Parse-StringWithDelimiter -String $record."SMS Users" -Delimiter ","
-            $amountGranted = Grant-SMSPermissions $authToken $accountKey $record."Phone Number" $phoneNumberId $smsUsers       
+            $amountGranted = TryGrant-SMSPermissions $authToken $accountKey $record."Phone Number" $phoneNumberId $smsUsers       
             if ($amountGranted -gt 0) { $amountSmsGranted++ } 
         }
     }
@@ -464,7 +476,7 @@ function Assign-PhoneNumbers($authToken, $accountKey, $importedCsv, $phoneNumber
     Write-Host "$amountSmsGranted numbers had SMS permissions granted." -ForegroundColor $successColor
 }
 
-function Route-PhoneNumber($authToken, $phoneNumber, $phoneNumberId, $extensionId, $email)
+function TryRoute-PhoneNumber($authToken, $phoneNumber, $phoneNumberId, $extensionId, $email)
 {
     $url = "https://api.goto.com/voice-admin/v1/phone-numbers/$phoneNumberId"
 
@@ -494,6 +506,11 @@ function Route-PhoneNumber($authToken, $phoneNumber, $phoneNumberId, $extensionI
         $successful = $false
     }
 
+    if ($successful)
+    {
+        Write-Host "$phoneNumber`: Routed to $email (If it wasn't already.)" -ForegroundColor $successColor
+    }
+
     return $successful
 }
 
@@ -521,7 +538,7 @@ function Parse-StringWithDelimiter($string, $delimiter)
     return ($string.Split("$delimiter")).Trim()
 }
 
-function Grant-SMSPermissions($authToken, $accountKey, $phoneNumber, $phoneNumberId, $smsUsers)
+function TryGrant-SMSPermissions($authToken, $accountKey, $phoneNumber, $phoneNumberId, $smsUsers)
 {
     $url = "https://api.goto.com/voice-admin/v1/phone-numbers/$phoneNumberId/permissions"
 
@@ -534,7 +551,7 @@ function Grant-SMSPermissions($authToken, $accountKey, $phoneNumber, $phoneNumbe
     $amountGranted = 0
     foreach ($email in $smsUsers)
     {
-        $goToUser = Get-GoToUser -AuthToken $authToken -AccountKey $accountKey -Email $email
+        $goToUser = TryGet-GoToUser -AuthToken $authToken -AccountKey $accountKey -Email $email
         if ($null -eq $goToUser) { continue }
 
         $userKey = $goToUser.results[0].key
@@ -548,6 +565,7 @@ function Grant-SMSPermissions($authToken, $accountKey, $phoneNumber, $phoneNumbe
         {
             Invoke-RestMethod -Method "Post" -Uri $url -Headers $headers -Body $body -ErrorVariable "responseError" | Out-Null
             $amountGranted++
+            Write-Host "$phoneNumber`: SMS granted to $email (If it wasn't already.)" -ForegroundColor $successColor
         }
         catch
         {
@@ -567,13 +585,15 @@ Show-Introduction
 $needHelp = Prompt-YesOrNo "Need help obtaining an access token for the GoTo API?"
 if ($needHelp -eq "Y") { Show-HelpMessage }
 $authToken = Prompt-AuthToken
-$accountKey = Get-AccountKey $authToken
+$accountKey = Get-AccountKey $authToken -ExitOnFailure
 $expectedHeaders = Get-ExpectedHeaders
-$importedCsv = Prompt-Csv $expectedHeaders
 
+$importedCsv = Prompt-Csv $expectedHeaders
 Write-Host "Parsing Csv..." -ForegroundColor $infoColor
 Add-UserInfo -AuthToken $authToken -AccountKey $accountKey -ImportedCsv $importedCsv # Adds user info to the importedCsv.
 Format-PhoneNumbers $importedCsv # Formats the phone numbers in the importedCsv.
+
+Read-Host "Press Enter to make the changes"
 
 Write-Host "Gathering info from your GoTo account..." -ForegroundColor $infoColor
 $phoneNumbers = Get-AllPhoneNumbers $authToken $accountKey

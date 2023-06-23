@@ -9,25 +9,20 @@
 - Classes and namespaces
 - Input validation
     - Auth token valid but lacks permissions
-    - What if number was already routed to same person or someone else?
-    - What if person already had SMS perms?
+    - Phone number left blank
+    - Phone number invalid format
+    - Phone number not found
+    - Email left blank (should still be able to grant SMS users)
+    - Email invalid format
+    - Email not found
+    - SMS users left blank
+    - SMS users invalid format
+    - SMS user not found
 - Output validation
-- To Do    
-    - When phone numbers are invalid, give option to exit and fix script. give option to say N to all.
-    - Input validation of SMS users
-    - Input validation of emails
-    - What happens when phone number invalid?
-    - What happens when email invalid?
-    - What happens when SMS users invalid?
+- To Do
     - Prompt for authToken as secure string
 - Done but not tested
-    - Explain CSV requirements.
-    - Showing counts of everything processes. Granting SMS should return true if sms was granted to 1 or more users.
-    - Show how many phone numbers were assigned
-    - Show how many phone numbers had SMS granted
-    - Assign users to write progress
 - Done and tested 
-    - Convert SMS users into string array
 #>
 
 BeforeAll {
@@ -45,8 +40,12 @@ BeforeAll {
 
     Initialize-ColorScheme    
     $validToken = Get-Content "..\Private\authToken.txt"
-    $accountKey = Get-AccountKey $validToken
+    $validAccountKey = Get-AccountKey $validToken
     $validCsv = Import-Csv "..\Private\ValidData.csv"
+    $validEmail = Get-Content "..\Private\validEmail.txt"
+    $validExtensionId = Get-Content "..\Private\validExtensionId.txt"
+
+
     $invalidHeaders = Import-Csv "..\Private\InvalidHeaders.csv"
     $invalidUsers = Import-Csv "..\Private\InvalidUsers.csv"
     
@@ -109,11 +108,21 @@ Describe "Validate-AuthToken" {
 Describe "Get-AccountKey" {
     Context "When passed valid token" {
         It "Should not return null" {
-            $accountKey = Get-AccountKey $validToken
+            $key = Get-AccountKey $validToken
 
-            Write-Host "accountKey is $accountKey"
+            Write-Host "accountKey is $key"
 
-            $accountKey | Should -Not -BeNullOrEmpty
+            $key  | Should -Not -BeNullOrEmpty
+        }
+    }
+    Context "When passed invalid token" {
+        It "Shoudld return null" {
+            Get-AccountKey "Invalid Token" | Should -Be $null
+        }
+    }
+    Context "When passed invalid token with exitOnFailure" -Skip {
+        It "Should exit the program" {
+            Get-AccountKey "Invalid Token" -ExitOnFailure
         }
     }
 }
@@ -139,7 +148,7 @@ Describe "Add-UserInfo" {
     Context "When passed valid data" {
         It "Should add a property to the records called UserInfo" {
             $validCsvCopy = $validCsv.Clone()
-            Add-UserInfo -ImportedCsv $validCsvCopy -AuthToken $validToken -AccountKey $accountKey
+            Add-UserInfo -ImportedCsv $validCsvCopy -AuthToken $validToken -AccountKey $validAccountKey
 
             foreach ($record in $validCsvCopy)
             {
@@ -149,24 +158,38 @@ Describe "Add-UserInfo" {
         }
     }
     Context "When passed all invalid users" {
-        It "Should return an array of null records" {
+        It "All records should remain without a UserInfo property" {
             $invalidUsersCopy = $invalidUsers.Clone()
-            Add-UserInfo -ImportedCsv $invalidUsersCopy -AuthToken $validToken -AccountKey $accountKey
+            Add-UserInfo -ImportedCsv $invalidUsersCopy -AuthToken $validToken -AccountKey $validAccountKey
 
             foreach ($record in $invalidUsersCopy)
             {
-                $record | Should -Be $null
+                $containsUserInfoProp = $record.PSObject.Properties.Name -Contains "UserInfo"
+                $containsUserInfoProp | Should -Be $false
             }
         }        
     }
 }
 
-Describe "Get-GoTouser" {
+Describe "TryGet-GoTouser" {
     Context "When passed valid email and valid authToken" {
         It "Should not return null" {
-            $email = Get-Content "..\Private\validEmail.txt"
-
-            Get-GoToUser -Email $email -AuthToken $validToken -AccountKey $accountKey | Should -Not -BeNullOrEmpty
+            TryGet-GoToUser -AuthToken $validToken -AccountKey $validAccountKey -Email $validEmail | Should -Not -BeNullOrEmpty
+        }
+    }
+    Context "When passed invalid authToken" {
+        It "Should return null" {
+            TryGet-GoToUser -Email $validEmail -AuthToken "Invalid token" -AccountKey $validAccountKey | Should -Be $null
+        }
+    }
+    Context "When passed invalid email" {
+        It "Should return null" {
+            TryGet-GoToUser -Email "Invalid email" -AuthToken $validToken -AccountKey $validAccountKey | Should -Be $null
+        }
+    }
+    Context "When passed invalid accountKey" {
+        It "Should return null" {
+            TryGet-GoToUser -Email $validEmail -AuthToken $validToken -AccountKey "invalid key" | Should -Be $null
         }
     }
 }
@@ -195,7 +218,7 @@ Describe "Format-PhoneNumbers" {
 Describe "Get-AllPhoneNumbers" -Skip {
     Context "When passed valid authToken" {
         It "Responses should not be null" {                       
-            $responses = Get-AllPhoneNumbers $validToken
+            $responses = Get-AllPhoneNumbers $validToken $validAccountKey
             $responses | Should -Not -BeNullOrEmpty
         }
     }
@@ -230,20 +253,43 @@ Describe "New-ExtensionLookupTable" -Skip {
     }
 }
 
+# Assign-PhoneNumbers
+# Route-PhoneNumber
+
+Describe "TryRoute-PhoneNumber" {
+    Context "When passed invalid phone number" {
+        It "Should return false and throw a warning" {
+            TryRoute-PhoneNumber -AuthToken $validToken -PhoneNumber "Invalid Phone Number" -PhoneNumberId "Invalid ID" -ExtensionId $validExtensionId -Email $validEmail |
+            Should -Be $false
+        }
+    }
+}
+
+Describe "TryGrant-SMSPermissions" {
+    Context "When passed invalid data" {
+        It "Should return 0 amountGranted" {
+            TryGrant-SMSPermissions -AuthToken $validToken -AccountKey $validAccountKey -PhoneNumber "Invalid Phone Number" -PhoneNumberId "Invalid PN ID" -SmsUsers "Invalid users" |
+            Should -Be 0
+        }
+    }
+}
+
+# Grant-SMSPermissions
+
 Describe "ConvertTo-Name" {
     Context "When passed john.doe@domain.com" {
         It "Should return John Doe" {
             ConvertTo-Name "john.doe@domain.com" | Should -Be "John Doe"
         }
     }
-    Context "When passed invalid email" {
-        It "Should throw warning and return null" {
-            ConvertTo-Name "Invalid Email" | Should -Be $null
-        }
-    }
     Context "When passed John.Doe@domain.com" {
         It "Should return John Doe" {
             ConvertTo-Name "John.Doe@domain.com" | Should -Be "John Doe"
+        }
+    }
+    Context "When passed invalid email" {
+        It "Should throw warning and return null" {
+            ConvertTo-Name "Invalid Email" | Should -Be $null
         }
     }
 }
