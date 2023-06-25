@@ -1,30 +1,3 @@
-<#
-- Problem statement
-- Use cases and features
-- Minimum viable product
-- Inputs
-- Outputs
-- Program flow
-- Functions
-- Classes and namespaces
-- Input validation
-    - Auth token valid but lacks permissions
-    - Phone number left blank
-    - Phone number invalid format
-    - Phone number not found
-    - Email left blank (should still be able to grant SMS users)
-    - Email invalid format
-    - Email not found
-    - SMS users left blank
-    - SMS users invalid format
-    - SMS user not found
-- Output validation
-- To Do
-    - Prompt for authToken as secure string
-- Done but not tested
-- Done and tested 
-#>
-
 BeforeAll {
     # Optional
     # BeforeAll runs once at the beginning of the file.
@@ -267,9 +240,9 @@ Describe "TryRoute-PhoneNumber" {
 
 Describe "TryGrant-SMSPermissions" {
     Context "When passed invalid data" {
-        It "Should return 0 amountGranted" {
+        It "Should return false" {
             TryGrant-SMSPermissions -AuthToken $validToken -AccountKey $validAccountKey -PhoneNumber "Invalid Phone Number" -PhoneNumberId "Invalid PN ID" -SmsUsers "Invalid users" |
-            Should -Be 0
+            Should -Be $false
         }
     }
 }
@@ -285,11 +258,6 @@ Describe "ConvertTo-Name" {
     Context "When passed John.Doe@domain.com" {
         It "Should return John Doe" {
             ConvertTo-Name "John.Doe@domain.com" | Should -Be "John Doe"
-        }
-    }
-    Context "When passed invalid email" {
-        It "Should throw warning and return null" {
-            ConvertTo-Name "Invalid Email" | Should -Be $null
         }
     }
 }

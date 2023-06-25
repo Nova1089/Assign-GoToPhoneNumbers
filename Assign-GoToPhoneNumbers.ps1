@@ -255,8 +255,17 @@ function Add-UserInfo($authToken, $accountKey, $importedCsv)
 
     for ($i = 0; $i -lt $importedCsv.Count; $i++)
     {
+        if ([String]::IsNullOrEmpty($importedCsv[$i].Email)) { continue }
+                
+        $userInfo = $null       
         $email = $importedCsv[$i].Email.Trim().Trim('"')
-        $userInfo = TryGet-GoToUser -AuthToken $authToken -AccountKey $accountKey -Email $email
+        $isValidEmail = Validate-Email $email
+
+        if ($isValidEmail)
+        {
+            $userInfo = TryGet-GoToUser -AuthToken $authToken -AccountKey $accountKey -Email $email
+        }
+        
         if ($userInfo)
         {
             Add-Member -InputObject $importedCsv[$i] -NotePropertyName "UserInfo" -NotePropertyValue $userInfo
@@ -322,12 +331,13 @@ function Format-PhoneNumbers($importedCsv)
         if ($record."Phone Number" -notmatch $phoneNumberRegex)
         {
             Write-Warning "$($record."Phone Number") is not a valid number."
+            continue
         }
 
         $record."Phone Number" = $record."Phone Number".Replace("-", "").Replace("(", "").Replace(")", "").Replace(".", "").Replace("+", "").Replace(" ", "")
         $record."Phone Number" = "+$($record."Phone Number")"
     }
-    if ($amountBlankNumber -gt 0)
+    if ($amountBlankNumbers -gt 0)
     {
         Write-Warning "There are $amountBlankNumbers empty phone numbers in the CSV."
     }    
@@ -451,9 +461,9 @@ function Assign-PhoneNumbers($authToken, $accountKey, $importedCsv, $phoneNumber
         $recordsProcessed++
 
         if ($null -eq $record) { continue }
-        if ($null -eq $record."Phone Number") { continue }
+        if ([String]::IsNullOrEmpty($record."Phone Number")) { continue }
 
-        if ($record.Email -and $record.UserInfo)
+        if ($record.UserInfo)
         {
             $phoneNumberId = $phoneNumberLookupTable[$record."Phone Number"]
             $extId = $extensionLookupTable[$record.UserInfo.results[0].settings.JIVE.primaryExtensionNumber]
@@ -464,9 +474,19 @@ function Assign-PhoneNumbers($authToken, $accountKey, $importedCsv, $phoneNumber
 
         if ($record."SMS Users")  
         {
+            $phoneNumberId = $phoneNumberLookupTable[$record."Phone Number"]
             $smsUsers = Parse-StringWithDelimiter -String $record."SMS Users" -Delimiter ","
-            $amountGranted = TryGrant-SMSPermissions $authToken $accountKey $record."Phone Number" $phoneNumberId $smsUsers       
-            if ($amountGranted -gt 0) { $amountSmsGranted++ } 
+
+            $hadSuccess = $null
+            foreach ($email in $smsUsers)
+            {
+                $isValidEmail = Validate-Email $email
+                if (-not($isValidEmail)) { continue }
+
+                $successful = TryGrant-SMSPermissions $authToken $accountKey $record."Phone Number" $phoneNumberId $email
+                if ($successful) { $hadSuccess = $true }                
+            }
+            if ($hadSuccess) { $amountSmsGranted++ }
         }
     }
     Write-Progress -Activity "Assigning phone numbers..." -Status "$recordsProcessed records processed"
@@ -516,21 +536,24 @@ function TryRoute-PhoneNumber($authToken, $phoneNumber, $phoneNumberId, $extensi
 
 function ConvertTo-Name($email)
 {
-    # Function expects email in format of word1.word2@domain.com where word1 is first name and word2 is last name.    
-    $emailRegex = '^\s*[\w\.-]+\.[\w\.-]+@[\w\.-]+\.\w{2,4}\s*$'
-
-    if ($email -inotmatch $emailRegex)
-    {
-        Write-Warning ("Email is invalid: $email `n" +
-                      "Expected format is firstname.lastname@domain.com `n")
-        return $null        
-    }
-
     $namePart = $email.Split('@')[0]
     $fullName = $namePart.Replace('.', " ")
     $fullNameCapitalized = $fullName.Split(" ") | Foreach-Object { $_.SubString(0, 1).ToUpper() + $_.SubString(1).ToLower() }
-
     return $fullNameCapitalized -Join " "
+}
+
+function Validate-Email($email)
+{
+    # Expects email in format of word1.word2@domain.com where word1 is first name and word2 is last name.  
+    $isValidEmail = $email -imatch '^\s*[\w\.-]+\.[\w\.-]+@[\w\.-]+\.\w{2,4}\s*$'
+    
+    if (-not($isValidEmail))
+    {
+        Write-Warning ("Email is invalid: $email `n" +
+                "    Expected format is firstname.lastname@domain.com `n")
+    }
+
+    return $isValidEmail
 }
 
 function Parse-StringWithDelimiter($string, $delimiter)
@@ -538,7 +561,7 @@ function Parse-StringWithDelimiter($string, $delimiter)
     return ($string.Split("$delimiter")).Trim()
 }
 
-function TryGrant-SMSPermissions($authToken, $accountKey, $phoneNumber, $phoneNumberId, $smsUsers)
+function TryGrant-SMSPermissions($authToken, $accountKey, $phoneNumber, $phoneNumberId, $email)
 {
     $url = "https://api.goto.com/voice-admin/v1/phone-numbers/$phoneNumberId/permissions"
 
@@ -546,37 +569,33 @@ function TryGrant-SMSPermissions($authToken, $accountKey, $phoneNumber, $phoneNu
         Authorization = "Bearer $authToken"
         "Content-Type" = "application/json"
         Accept = "application/json"
-    }
-    
-    $amountGranted = 0
-    foreach ($email in $smsUsers)
+    }    
+
+    $goToUser = TryGet-GoToUser -AuthToken $authToken -AccountKey $accountKey -Email $email
+    if ($null -eq $goToUser) { return $false }
+    $userKey = $goToUser.results[0].key
+
+    $body = @{
+        userKey = $userKey
+        permissions = @("TEXTING")
+    } | ConvertTo-Json
+
+    try
     {
-        $goToUser = TryGet-GoToUser -AuthToken $authToken -AccountKey $accountKey -Email $email
-        if ($null -eq $goToUser) { continue }
-
-        $userKey = $goToUser.results[0].key
-
-        $body = @{
-            userKey = $userKey
-            permissions = @("TEXTING")
-        } | ConvertTo-Json
-
-        try
-        {
-            Invoke-RestMethod -Method "Post" -Uri $url -Headers $headers -Body $body -ErrorVariable "responseError" | Out-Null
-            $amountGranted++
-            Write-Host "$phoneNumber`: SMS granted to $email (If it wasn't already.)" -ForegroundColor $successColor
-        }
-        catch
-        {
-            Write-Warning ("There was an error granting SMS permissions. `n" +
-                            "    Phone Number $phoneNumber `n" +
-                            "    User: $email")            
-            Write-Host $responseError[0].Message -ForegroundColor $warningColor
-        }
+        Invoke-RestMethod -Method "Post" -Uri $url -Headers $headers -Body $body -ErrorVariable "responseError" | Out-Null
+        Write-Host "$phoneNumber`: SMS granted to $email (If it wasn't already.)" -ForegroundColor $successColor
+        $successful = $true
+    }
+    catch
+    {
+        Write-Warning ("There was an error granting SMS permissions. `n" +
+                        "    Phone Number $phoneNumber `n" +
+                        "    User: $email")            
+        Write-Host $responseError[0].Message -ForegroundColor $warningColor
+        $successful = $false
     }
 
-    return $amountGranted
+    return $successful
 }
 
 # main
